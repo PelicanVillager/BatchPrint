@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: PrintPresetStore
     @StateObject private var runner = PrintJobRunner()
+    @StateObject private var printerMonitor = PrinterMonitor()
 
     @State private var folderURL: URL?
     @State private var files: [PrintFileItem] = []
@@ -22,6 +23,10 @@ struct ContentView: View {
     @State private var showRoundsAlert = false
     @State private var roundsConfirmed = false
     @State private var pendingSkipMissing = false
+    @State private var showPrinterHealthAlert = false
+    @State private var printerHealthMessage = ""
+    @State private var printerFixMessage: String?
+    @State private var summaryAdvice: String?
 
     private var selectedFiles: [PrintFileItem] {
         files.filter(\.isSelected)
@@ -35,6 +40,14 @@ struct ContentView: View {
         let selected = selectedFiles
         guard selected.count == 1, let item = selected.first else { return nil }
         return item.type == .doc || item.type == .docx ? item : nil
+    }
+
+    /// 工具栏上那个红色提醒按钮的文案：队列的问题谈队列，设备的问题谈设备。
+    private var printerAlertTitle: String {
+        guard let health = printerMonitor.health else { return "打印机状态异常" }
+        if health.isStopped || !health.isAcceptingJobs { return "队列已停用，点此恢复" }
+        if health.deviceReachable == false { return "打印机不在线，点此重试" }
+        return "打印机不可用"
     }
 
     var body: some View {
@@ -60,8 +73,13 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 560)
+        .environmentObject(printerMonitor)
         .onAppear {
             refreshPrinterList()
+        }
+        .task(id: store.preset.printerName) {
+            // 界面出现时、以及切换目标打印机时，都自动体检一次。
+            await printerMonitor.refresh(printerName: store.preset.printerName)
         }
         .onReceive(NotificationCenter.default.publisher(for: .batchPrintSelectFolder)) { _ in
             chooseFolder()
@@ -87,6 +105,25 @@ struct ContentView: View {
             }
         } message: {
             Text(roundsAlertMessage)
+        }
+        .alert("打印前检查：打印机现在不能打", isPresented: $showPrinterHealthAlert) {
+            Button("恢复队列并继续打印") {
+                Task { await resumeQueueAndStart() }
+            }
+            Button("仍然继续提交") {
+                startPrint(skippingMissing: pendingSkipMissing, forcingUnhealthyQueue: true)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(printerHealthMessage)
+        }
+        .alert("恢复队列失败", isPresented: Binding(
+            get: { printerFixMessage != nil },
+            set: { if !$0 { printerFixMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(printerFixMessage ?? "未知错误")
         }
         .alert("扫描失败", isPresented: Binding(
             get: { scannerErrorMessage != nil },
@@ -173,6 +210,16 @@ struct ContentView: View {
             }
 
             Spacer()
+
+            if printerMonitor.health?.needsAttention == true {
+                Button {
+                    Task { await handlePrinterAlert() }
+                } label: {
+                    Label(printerAlertTitle, systemImage: "exclamationmark.triangle.fill")
+                }
+                .tint(.red)
+                .help("目标打印队列当前不能打印，点一下试着让它重新工作")
+            }
 
             Button {
                 previewSelectedWordDocument()
@@ -264,6 +311,9 @@ struct ContentView: View {
             lines.append("\n失败详情：")
             lines.append(contentsOf: summary.failed)
         }
+        if let summaryAdvice {
+            lines.append("\n" + summaryAdvice)
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -338,7 +388,16 @@ struct ContentView: View {
         }
     }
 
-    private func startPrint(skippingMissing: Bool) {
+    private func startPrint(skippingMissing: Bool, forcingUnhealthyQueue: Bool = false) {
+        Task { @MainActor in
+            await performStartPrint(
+                skippingMissing: skippingMissing,
+                forcingUnhealthyQueue: forcingUnhealthyQueue
+            )
+        }
+    }
+
+    private func performStartPrint(skippingMissing: Bool, forcingUnhealthyQueue: Bool) async {
         let queue = files.filter(\.isSelected)
         let missing = FileAvailabilityChecker.check(queue)
 
@@ -355,6 +414,20 @@ struct ContentView: View {
             return
         }
         roundsConfirmed = false
+        pendingSkipMissing = skippingMissing
+
+        // 打印前体检：队列被停用、打印机掉线这类问题先摊开说，别让作业悄悄堆在队列里。
+        if !forcingUnhealthyQueue {
+            let health = await printerMonitor.refresh(printerName: store.preset.printerName)
+            if health.needsAttention {
+                printerHealthMessage = healthAlertMessage(health)
+                showPrinterHealthAlert = true
+                return
+            }
+            runner.preflightNotes = preflightNotes(for: health)
+        } else {
+            runner.preflightNotes = ["打印前检查：用户选择忽略队列异常，直接提交作业。"]
+        }
 
         let missingIDs = Set(missing.map(\.item.id))
         for missingItem in missing {
@@ -378,19 +451,69 @@ struct ContentView: View {
         isPrinting = true
         showProgressPanel = true
 
-        Task {
-            let result = await runner.run(
-                items: availableQueue,
-                preset: store.preset
-            ) { id, status in
-                updateStatus(for: id, status: status)
-            }
-
-            isPrinting = false
-            showProgressPanel = false
-            summary = result
-            showSummaryAlert = true
+        let result = await runner.run(
+            items: availableQueue,
+            preset: store.preset
+        ) { id, status in
+            updateStatus(for: id, status: status)
         }
+
+        // 打完之后再看一眼：如果是队列被停用拖累的失败，直接在结果里给出下一步。
+        let healthAfterRun = await printerMonitor.refresh(printerName: store.preset.printerName)
+        summaryAdvice = adviceAfterRun(summary: result, health: healthAfterRun)
+
+        isPrinting = false
+        showProgressPanel = false
+        summary = result
+        showSummaryAlert = true
+    }
+
+    /// 恢复队列，成功后直接接着打印。
+    private func resumeQueueAndStart() async {
+        let outcome = await printerMonitor.resume(printerName: store.preset.printerName)
+        if outcome.succeeded {
+            startPrint(skippingMissing: pendingSkipMissing)
+        } else {
+            printerFixMessage = outcome.message
+        }
+    }
+
+    /// 工具栏红按钮：队列类问题就地恢复，设备类问题重新探一次。
+    private func handlePrinterAlert() async {
+        let health = printerMonitor.health
+        if health?.isStopped == true || health?.isAcceptingJobs == false {
+            await printerMonitor.resume(printerName: store.preset.printerName)
+        } else {
+            await printerMonitor.refresh(printerName: store.preset.printerName)
+        }
+    }
+
+    private func healthAlertMessage(_ health: PrinterHealth) -> String {
+        var lines: [String] = ["打印机「\(health.printerName)」\(health.headline)。"]
+        if health.isStopped, !health.stateMessage.isEmpty {
+            lines.append("系统给出的原因：\(health.stateMessage)")
+        }
+        if !health.suggestions.isEmpty {
+            lines.append("")
+            lines.append(contentsOf: health.suggestions)
+        }
+        lines.append("")
+        lines.append("现在提交的话，作业只会排在队列里，不会出纸。")
+        return lines.joined(separator: "\n")
+    }
+
+    private func preflightNotes(for health: PrinterHealth) -> [String] {
+        var notes = ["打印前检查：\(health.printerName) — \(health.headline)"]
+        if health.pendingJobs > 0 {
+            notes.append("打印前检查：队列中已有 \(health.pendingJobs) 个未完成作业。")
+        }
+        return notes
+    }
+
+    private func adviceAfterRun(summary: PrintSummary, health: PrinterHealth) -> String? {
+        guard !summary.failed.isEmpty || summary.notExecuted > 0 else { return nil }
+        guard health.needsAttention else { return nil }
+        return "提示：\(health.headline)。\(health.suggestions.first ?? "") 处理后可重新提交失败的作业。"
     }
 
     private func updateStatus(for id: UUID, status: PrintJobStatus) {

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PrintSettingsView: View {
     @EnvironmentObject private var store: PrintPresetStore
+    @EnvironmentObject private var monitor: PrinterMonitor
     let printerNames: [String]
 
     var body: some View {
@@ -18,6 +19,10 @@ struct PrintSettingsView: View {
                     Button("刷新打印机列表") {
                         NotificationCenter.default.post(name: .batchPrintRefreshPrinters, object: nil)
                     }
+
+                    Divider()
+
+                    printerStatusRow
                 }
 
                 Section("页面范围") {
@@ -134,6 +139,93 @@ struct PrintSettingsView: View {
                 store.preset.printerName = newValue.isEmpty ? nil : newValue
             }
         )
+    }
+
+    /// 打印前体检的状态行：队列被停用时直接给一个“恢复队列”按钮。
+    @ViewBuilder
+    private var printerStatusRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if monitor.isChecking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: statusIcon)
+                        .foregroundStyle(statusTint)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(monitor.isChecking ? "正在检查打印机状态…" : statusTitle)
+                        .font(.callout)
+                    if let detail = monitor.health?.detailText, !monitor.isChecking {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let checked = monitor.lastCheckedText, !monitor.isChecking {
+                        Text(checked)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Spacer()
+            }
+
+            HStack {
+                Button("检查状态") {
+                    Task { await monitor.refresh(printerName: store.preset.printerName) }
+                }
+
+                if monitor.health?.needsAttention == true {
+                    Button("恢复队列") {
+                        Task { await monitor.resume(printerName: store.preset.printerName) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("让被停用的打印队列重新开始工作")
+                }
+
+                if monitor.health?.errorPolicy != nil, monitor.health?.hasAutoRetry == false {
+                    Button("开启自动重试") {
+                        Task { await monitor.enableAutoRetry(printerName: store.preset.printerName) }
+                    }
+                    .help("把队列出错策略改成 retry-job：打印机打盹导致的超时自动重试，不再一次失败就停掉整个队列")
+                }
+
+                Spacer()
+            }
+
+            if let message = monitor.actionMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var statusTitle: String {
+        monitor.health?.headline ?? "还没检查打印机状态"
+    }
+
+    private var statusIcon: String {
+        switch monitor.health?.severity {
+        case .ok: "checkmark.circle.fill"
+        case .info: "printer.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .critical: "xmark.octagon.fill"
+        case .unknown, nil: "questionmark.circle.fill"
+        }
+    }
+
+    private var statusTint: Color {
+        switch monitor.health?.severity {
+        case .ok: .green
+        case .info: .blue
+        case .warning: .orange
+        case .critical: .red
+        case .unknown, nil: .secondary
+        }
     }
 
     /// 用一句人话解释“批次数”是怎么回事，省得跟“份数”混起来。

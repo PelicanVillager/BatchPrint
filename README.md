@@ -8,6 +8,7 @@ BatchPrint 是一个 macOS 原生批量打印工具，使用 SwiftUI 编写。�
 - 文件列表展示名称、大小、修改时间和状态。
 - 支持勾选、全选/反选、拖拽排序。
 - 自动获取系统打印机列表，保存并恢复打印预设。
+- 打印前先给目标队列做一次“体检”：队列被停用、打印机掉线都会当场提示并提供一键恢复；还能读出队列的出错策略，一键开启“超时自动重试”。
 - 支持页面范围、份数、单双面、色彩模式、纸张尺寸、缩放和方向设置。
 - 支持“批次（整批重复）”打印：一批 = 把选中的文件按列表顺序各打印一遍，打完这一批再开始下一批，批次之间可以留出取纸、装订的间隔时间。
 - 每批打印前会把最终下发给打印机的参数（含 `sides=…` 双面参数）写进运行日志，便于确认设置真的生效。
@@ -24,6 +25,7 @@ BatchPrint/
   BatchPrintApp.swift
   Models/
     FileType.swift
+    PrinterHealth.swift
     PrintFileItem.swift
     PrintJobStatus.swift
     PrintPreset.swift
@@ -34,6 +36,8 @@ BatchPrint/
     OfficePDFConverter.swift
     PrintJobRunner.swift
     PrintPresetStore.swift
+    PrinterHealthService.swift
+    PrinterMonitor.swift
     PrinterService.swift
     WordDocumentPrinter.swift
   Views/
@@ -82,6 +86,10 @@ make run     # 打包并打开 .app
 ```bash
 .build/release/BatchPrint --list-printers
 .build/release/BatchPrint --print-check --duplex longEdge --copies 2
+.build/release/BatchPrint --printer-status      # 队列是否被停用、打印机是否在线
+.build/release/BatchPrint --resume-printer      # 恢复被停用的队列
+.build/release/BatchPrint --enable-auto-retry   # 出错策略改成自动重试，超时不再停队列
+.build/release/BatchPrint --self-test           # 只跑解析规则自检，不碰真实打印机
 ```
 
 输出示例：
@@ -93,6 +101,39 @@ make run     # 打包并打开 .app
 ```
 
 看到 `sides=two-sided-long-edge`（长边）或 `sides=two-sided-short-edge`（短边）就说明双面参数确实下发到打印系统了；如果打印机驱动本身不支持，会在“注意”里给出提示。
+
+`--printer-status` 的输出示例（队列被停用时退出码为 1，方便脚本判断）：
+
+```text
+目标打印机：HP_LaserJet_M403dn_BW
+队列状态：队列已停用，作业只会排队不出纸
+接收作业：是
+系统状态：Paused
+未完成作业：0
+出错策略：stop-printer（一次失败就会停用队列）
+设备地址：ipp://192.168.0.9/ipp/print
+设备连通：通
+建议：点「恢复队列」让作业重新开始出纸。
+建议：也可以手动执行：cupsenable HP_LaserJet_M403dn_BW
+建议：把出错策略改成自动重试，可以避免下次一次超时又停住队列（点「开启自动重试」）。
+结论：现在提交作业只会排队，不会出纸。
+```
+
+对应的 `make` 目标：`make check`（参数自检）、`make status`（体检）、`make resume`（恢复队列）、`make retry-job`（开启自动重试）、`make self-test`（解析规则自检）。
+
+### 队列出错策略（为什么建议开自动重试）
+
+CUPS 默认的队列出错策略是 `stop-printer`：只要有**一次**作业报“打印机没有响应”，整个队列就会被暂停，
+之后提交的作业全部静静排队。打印机深度休眠、网络抖动都可能触发它，这就是“打印机又不能用”的根因。
+
+改成 `retry-job` 后，超时会被自动重试，队列不再被停住：
+
+```bash
+sudo lpadmin -p HP_LaserJet_M403dn_BW -o printer-error-policy=retry-job
+```
+
+在 BatchPrint 里不用敲命令：设置面板的“打印机”一栏会读出当前策略，不是自动重试时会出现「开启自动重试」按钮；
+命令行则是 `BatchPrint --enable-auto-retry`。体检结果里也会写明当前策略。
 
 ## 实现说明与已知限制
 
@@ -115,6 +156,23 @@ make run     # 打包并打开 .app
 - 目前没有启用 App Sandbox，因此应用可以直接读取用户选择的文件夹。若要提交 App Store，需要补充沙盒配置与文件访问权限处理。
 
 ## 常见问题
+
+### 点了“开始打印”却一直不出纸，队列也不动？
+
+先看右侧设置面板最上面的“打印机状态”那一行，或者直接跑 `BatchPrint --printer-status`。
+
+最常见的原因是 **macOS 把打印队列停用了**：CUPS 的默认出错策略是 `stop-printer`，
+只要有作业报一次“打印机没有响应”（打印机深度休眠、网络抖动都会触发），整个队列就会被暂停，
+之后提交的作业只会安静地排队，从界面上看就像“点了没反应”。
+
+处理办法：点界面上那个红色的“队列已停用，点此恢复”，或在设置面板里点“恢复队列”，
+命令行则是 `BatchPrint --resume-printer`（等同于 `cupsenable 打印机名`）。
+BatchPrint 现在会在提交前主动体检，遇到这种情况先弹窗说明并给出一键恢复，不会再让作业悄悄堆进队列。
+
+要断根的话，把队列出错策略改成自动重试（设置面板里的“开启自动重试”、命令行 `--enable-auto-retry`、
+或者 `sudo lpadmin -p 打印机名 -o printer-error-policy=retry-job`），这样单次超时只会重试，不会停住队列。
+
+如果体检显示“打印机不在线”，那就是电源或网络的问题，跟队列无关。
 
 ### 怎么让一批文件“整批打完再打下一批”？
 

@@ -73,6 +73,8 @@ final class PrintJobRunner: ObservableObject {
     private var onStatusChange: ((UUID, PrintJobStatus) -> Void)?
     /// 本次运行中已经转换好的 Word → PDF，批次之间复用，避免每一批都重新转换。
     private var convertedPDFs: [URL: URL] = [:]
+    /// 界面在提交前做的“打印前体检”结论，会被写进本次运行日志的开头。
+    var preflightNotes: [String] = []
 
     func cancel() {
         cancelled = true
@@ -104,6 +106,8 @@ final class PrintJobRunner: ObservableObject {
         preset: PrintPreset,
         onStatusChange: @escaping (UUID, PrintJobStatus) -> Void
     ) async -> PrintSummary {
+        // reset() 会清日志，所以先把体检结论捞出来，稍后再写进去。
+        let preflight = preflightNotes
         reset()
         self.onStatusChange = onStatusChange
         defer { removeConvertedPDFs() }
@@ -117,10 +121,17 @@ final class PrintJobRunner: ObservableObject {
         progress.currentRoundTotal = queue.count
         progress.isRunning = true
 
+        for note in preflight {
+            appendLog(note)
+        }
+
         var succeeded = 0
         var failures: [String] = []
         var skipped: [String] = []
         var completed = 0
+        /// 连续失败的次数：连着失败多半是打印机/队列出了状况，提示一次就够了。
+        var consecutiveFailures = 0
+        var warnedAboutFailures = false
 
         if rounds > 1 {
             appendLog("打印队列共 \(queue.count) 个文件 × \(rounds) 批，合计 \(totalJobs) 个作业。")
@@ -162,6 +173,7 @@ final class PrintJobRunner: ObservableObject {
                     try await printFile(at: item.url, preset: preset)
                     succeeded += 1
                     completed += 1
+                    consecutiveFailures = 0
                     updateStatus(for: item.id, status: .success)
                     appendLog("成功：\(item.fileName)")
                 } catch {
@@ -169,8 +181,13 @@ final class PrintJobRunner: ObservableObject {
                     let prefix = rounds > 1 ? "第 \(round) 批 · " : ""
                     failures.append("\(prefix)\(item.fileName)：\(message)")
                     completed += 1
+                    consecutiveFailures += 1
                     updateStatus(for: item.id, status: .failed(message))
                     appendLog("失败：\(item.fileName) — \(message)")
+                    if consecutiveFailures >= 3, !warnedAboutFailures {
+                        warnedAboutFailures = true
+                        appendLog("注意：已经连续失败 \(consecutiveFailures) 个作业，通常说明打印机被停用或掉线，建议先停止并检查队列状态。")
+                    }
                 }
 
                 progress.completedJobs = completed
