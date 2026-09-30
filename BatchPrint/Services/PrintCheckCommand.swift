@@ -116,7 +116,10 @@ enum PrintCheckCommand {
     private static func printerStatus(printerName: String?) -> Int32 {
         let health = waitFor { await PrinterHealthService.inspect(printerName: printerName) }
 
-        print("目标打印机：\(health.printerName.isEmpty ? "未指定" : health.printerName)")
+        print("目标打印机：\(health.title.isEmpty ? "未指定" : health.title)")
+        if !health.printerName.isEmpty, health.printerName != health.title {
+            print("CUPS 队列名：\(health.printerName)")
+        }
         print("队列状态：\(health.headline)")
         print("接收作业：\(health.isAcceptingJobs ? "是" : "否")")
         if !health.stateMessage.isEmpty {
@@ -138,6 +141,10 @@ enum PrintCheckCommand {
 
         if health.needsAttention {
             print("结论：现在提交作业只会排队，不会出纸。")
+            return 1
+        }
+        if health.isUnknown {
+            print("结论：没能读到这台队列的状态，请确认打印机是否还在系统里。")
             return 1
         }
         print("结论：可以正常打印。")
@@ -171,7 +178,7 @@ enum PrintCheckCommand {
             }
 
             let health = waitFor { await PrinterHealthService.inspect(printerName: preset.printerName) }
-            print("打印机状态：\(health.printerName) — \(health.headline)")
+            print("打印机状态：\(health.title) — \(health.headline)")
             for suggestion in health.suggestions {
                 print("建议：\(suggestion)")
             }

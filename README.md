@@ -150,6 +150,8 @@ sudo lpadmin -p HP_LaserJet_M403dn_BW -o printer-error-policy=retry-job
 - 双面打印必须写进 `NSPrintInfo.printSettings`，键名是 `com_apple_print_PrintSettings_PMDuplexing`，取值为 `1` 单面、`2` 长边翻转、`3` 短边翻转。`NSPrintInfo.dictionary()` 只认官方声明的那几个键（纸张、份数、方向、缩放……），其它键会被静默忽略——早期版本写的 `NSPrintDuplex` / `NSPrintColorMode` 就属于这种情况，双面打印一直没生效，现在已改为正确写法。
 - 色彩模式通过驱动选项 `ColorModel`（`Gray` / `RGB` 等）设置，取值来自打印机 PPD；驱动未提供该选项时会跳过并在日志里提示。
 - 打印机会在打印前读取一次 PPD（`PMPrinterCopyDescriptionURL`），用于判断是否支持双面、支持哪种色彩模式；判断失败只是少一条提示，不会影响打印。
+- 打印机体检的数据来自本机 CUPS 的 IPP 接口（`ipptool` 一次 `CUPS-Get-Printers`），一次拿回队列名、描述、状态、设备地址、出错策略和排队作业数，**不受系统语言影响**；只有拿不到 `ipptool` 时才退回解析 `lpstat` 文本。
+- 系统里显示的打印机名（`NSPrinter` 给的名字，即 CUPS 的 `printer-info`）和真正的队列名经常不一样，例如显示名 `HP LaserJet M403dn` 对应队列 `HP_LaserJet_M403dn_BW`。体检会先按“队列名精确 → 显示名精确 → 忽略大小写空格后相等 → 互相包含”的顺序做映射，所以界面上按显示名选中的打印机也能正确定位到队列。
 - 份数会同时打开“按份装订”（collate），多页文档打印多份时是一份一份出纸。
 - 批次打印是“整批重复”：批次 3 表示选中的文件整套打完再重复两遍；如果只想让同一个文件多出几份，用“每份文件份数”。
 - AppleScript 自动打印首次运行时，macOS 可能要求授予自动化权限。
@@ -173,6 +175,13 @@ BatchPrint 现在会在提交前主动体检，遇到这种情况先弹窗说明
 或者 `sudo lpadmin -p 打印机名 -o printer-error-policy=retry-job`），这样单次超时只会重试，不会停住队列。
 
 如果体检显示“打印机不在线”，那就是电源或网络的问题，跟队列无关。
+
+### 为什么以前会显示“无法读取打印状态”？
+
+因为系统里的打印机名和 CUPS 的队列名不是一回事。界面上的名字（例如 `HP LaserJet M403dn`）是 CUPS 的
+`printer-info`，而队列名可能是 `HP_LaserJet_M403dn_BW`；拿显示名去问 `lpstat` 会直接报
+“目的位置名称无效”，体检就什么都读不到。现在体检改成通过 IPP 拿全部队列信息并做名字映射，
+显示名、队列名、模糊写法都能定位到同一台打印机，不会再出现这个提示。
 
 ### 怎么让一批文件“整批打完再打下一批”？
 

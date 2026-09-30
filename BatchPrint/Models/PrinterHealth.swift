@@ -24,7 +24,10 @@ struct PrinterHealth: Sendable, Equatable {
         case unknown
     }
 
+    /// CUPS 里的队列名，例如 `HP_LaserJet_M403dn_BW`；所有命令都用它。
     var printerName = ""
+    /// 系统里显示的名字（CUPS 的 `printer-info`），例如 `HP LaserJet M403dn`。
+    var displayName = ""
     var state: QueueState = .unknown
     /// 队列是否还在接收新作业（对应 `cupsaccept` 那个开关）。
     var isAcceptingJobs = true
@@ -44,6 +47,9 @@ struct PrinterHealth: Sendable, Equatable {
     var isStopped: Bool { state == .stopped }
     var isProcessing: Bool { state == .processing }
     var isUnknown: Bool { state == .unknown }
+
+    /// 说人话的时候用显示名，找不到就用队列名。
+    var title: String { displayName.isEmpty ? printerName : displayName }
 
     /// 出错策略是不是“自动重试”。CUPS 默认的 `stop-printer` 一次失败就把整个队列停掉。
     static let autoRetryPolicy = "retry-job"

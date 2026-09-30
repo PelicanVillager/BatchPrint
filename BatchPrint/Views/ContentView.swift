@@ -489,7 +489,7 @@ struct ContentView: View {
     }
 
     private func healthAlertMessage(_ health: PrinterHealth) -> String {
-        var lines: [String] = ["打印机「\(health.printerName)」\(health.headline)。"]
+        var lines: [String] = ["打印机「\(health.title)」\(health.headline)。"]
         if health.isStopped, !health.stateMessage.isEmpty {
             lines.append("系统给出的原因：\(health.stateMessage)")
         }
@@ -503,7 +503,7 @@ struct ContentView: View {
     }
 
     private func preflightNotes(for health: PrinterHealth) -> [String] {
-        var notes = ["打印前检查：\(health.printerName) — \(health.headline)"]
+        var notes = ["打印前检查：\(health.title) — \(health.headline)"]
         if health.pendingJobs > 0 {
             notes.append("打印前检查：队列中已有 \(health.pendingJobs) 个未完成作业。")
         }
