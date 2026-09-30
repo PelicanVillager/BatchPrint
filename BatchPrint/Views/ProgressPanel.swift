@@ -21,11 +21,17 @@ struct ProgressPanel: View {
                 HStack {
                     Text(currentTitle)
                     Spacer()
-                    Text("\(runner.progress.currentIndex)/\(runner.progress.total)")
+                    Text("\(runner.progress.completedJobs)/\(runner.progress.total)")
                         .foregroundStyle(.secondary)
                 }
             }
             .tint(.blue)
+
+            if runner.progress.rounds > 1 {
+                Text(roundTitle)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 5) {
@@ -60,5 +66,14 @@ struct ProgressPanel: View {
             return "正在打印：\(runner.progress.currentFileName)"
         }
         return "任务已全部处理"
+    }
+
+    private var roundTitle: String {
+        let progress = runner.progress
+        guard progress.currentRoundIndex > 0 else {
+            return "共 \(progress.rounds) 批，合计 \(progress.total) 个作业"
+        }
+        return "第 \(progress.currentRound)/\(progress.rounds) 批 · "
+            + "本批第 \(progress.currentRoundIndex)/\(progress.currentRoundTotal) 个文件"
     }
 }

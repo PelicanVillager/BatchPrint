@@ -4,6 +4,13 @@ import SwiftUI
 struct BatchPrintApp: App {
     @StateObject private var store = PrintPresetStore()
 
+    init() {
+        // 带上 --print-check / --list-printers 时不启动界面，直接做完自检就退出。
+        if let exitCode = PrintCheckCommand.exitCodeIfRequested() {
+            exit(exitCode)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

@@ -19,6 +19,9 @@ struct ContentView: View {
     @State private var isPrinting = false
     @State private var isPreviewing = false
     @State private var previewErrorMessage: String?
+    @State private var showRoundsAlert = false
+    @State private var roundsConfirmed = false
+    @State private var pendingSkipMissing = false
 
     private var selectedFiles: [PrintFileItem] {
         files.filter(\.isSelected)
@@ -73,6 +76,17 @@ struct ContentView: View {
             Button("取消打印", role: .cancel) {}
         } message: {
             Text(missingAlertMessage)
+        }
+        .alert("确认批次打印", isPresented: $showRoundsAlert) {
+            Button("开始打印") {
+                roundsConfirmed = true
+                startPrint(skippingMissing: pendingSkipMissing)
+            }
+            Button("取消", role: .cancel) {
+                roundsConfirmed = false
+            }
+        } message: {
+            Text(roundsAlertMessage)
         }
         .alert("扫描失败", isPresented: Binding(
             get: { scannerErrorMessage != nil },
@@ -226,14 +240,26 @@ struct ContentView: View {
         return "以下文件已不存在或无法访问：\n\n" + names.joined(separator: "\n")
     }
 
+    private var roundsAlertMessage: String {
+        let rounds = store.preset.normalizedRounds
+        let count = selectedFiles.count
+        return "将把勾选的 \(count) 个文件整套重复打印 \(rounds) 批，合计 \(count * rounds) 个作业。\n\n"
+            + "每一批都按列表顺序打印一遍，打完一批再开始下一批。"
+    }
+
     private var summaryMessage: String {
         guard let summary else { return "" }
         var lines = [
-            "总数：\(summary.total)",
+            "作业总数：\(summary.total)",
             "成功：\(summary.succeeded)",
-            "失败：\(summary.failed.count)",
-            "跳过：\(summary.skipped.count)"
+            "失败：\(summary.failed.count)"
         ]
+        if summary.rounds > 1 {
+            lines.append("批次数：\(summary.rounds)")
+        }
+        if summary.notExecuted > 0 {
+            lines.append("未执行：\(summary.notExecuted)")
+        }
         if !summary.failed.isEmpty {
             lines.append("\n失败详情：")
             lines.append(contentsOf: summary.failed)
@@ -322,6 +348,14 @@ struct ContentView: View {
             return
         }
 
+        // 批次打印会连着出很多纸，先确认一次，避免误操作。
+        if store.preset.normalizedRounds > 1, !roundsConfirmed {
+            pendingSkipMissing = skippingMissing
+            showRoundsAlert = true
+            return
+        }
+        roundsConfirmed = false
+
         let missingIDs = Set(missing.map(\.item.id))
         for missingItem in missing {
             updateStatus(for: missingItem.item.id, status: .skipped("文件缺失"))
@@ -329,7 +363,14 @@ struct ContentView: View {
 
         let availableQueue = queue.filter { !missingIDs.contains($0.id) }
         guard !availableQueue.isEmpty else {
-            summary = PrintSummary(total: queue.count, succeeded: 0, failed: [], skipped: missing.map(\.item.fileName))
+            summary = PrintSummary(
+                total: queue.count * store.preset.normalizedRounds,
+                rounds: store.preset.normalizedRounds,
+                succeeded: 0,
+                failed: [],
+                skipped: missing.map(\.item.fileName),
+                notExecuted: queue.count * store.preset.normalizedRounds
+            )
             showSummaryAlert = true
             return
         }

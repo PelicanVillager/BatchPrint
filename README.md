@@ -9,6 +9,8 @@ BatchPrint 是一个 macOS 原生批量打印工具，使用 SwiftUI 编写。�
 - 支持勾选、全选/反选、拖拽排序。
 - 自动获取系统打印机列表，保存并恢复打印预设。
 - 支持页面范围、份数、单双面、色彩模式、纸张尺寸、缩放和方向设置。
+- 支持“批次（整批重复）”打印：一批 = 把选中的文件按列表顺序各打印一遍，打完这一批再开始下一批，批次之间可以留出取纸、装订的间隔时间。
+- 每批打印前会把最终下发给打印机的参数（含 `sides=…` 双面参数）写进运行日志，便于确认设置真的生效。
 - 打印前检查缺失文件，可选择跳过缺失文件继续打印。
 - 显示实时进度和运行日志，结束后输出成功/失败汇总。
 - 打印过程中可停止后续任务；已提交的作业不受影响。
@@ -53,22 +55,44 @@ Makefile
 
 也可以直接打开根目录下的 `Package.swift`，以 Swift Package 方式运行 `BatchPrint` 可执行目标。
 
-## 使用 SwiftPM 构建并打包 .app
+## 构建并打包 .app
 
-在项目根目录执行：
-
-```bash
-swift build
-```
-
-生成可分发的 `.app`：
+在项目根目录执行（`make app` 内部直接调用 `swiftc`，不依赖 SwiftPM）：
 
 ```bash
 make app
 open dist/BatchPrint.app
 ```
 
-注意：当前工作环境只有 Command Line Tools，SwiftPM 编译已通过；完整的 Xcode 工程建议在安装了完整 Xcode 的机器上运行验证。
+其他常用命令：
+
+```bash
+make check   # 打印参数自检，不开界面
+make run     # 打包并打开 .app
+```
+
+注意：当前工作环境只有 Command Line Tools，而且本机 `swift build` 会报
+`this SDK is not supported by the compiler`（Command Line Tools 的 SDK 与 Swift 工具链版本不匹配），
+所以 `Makefile` 里的 `build` 目标改成直接用 `swiftc` 编译；在装有完整 Xcode 的机器上仍可用 SwiftPM / Xcode 工程构建。
+
+## 命令行自检
+
+打包好的应用（或 `.build/release/BatchPrint`）可以直接查询“这组参数最终会下发给打印机的选项”：
+
+```bash
+.build/release/BatchPrint --list-printers
+.build/release/BatchPrint --print-check --duplex longEdge --copies 2
+```
+
+输出示例：
+
+```text
+目标打印机：HP LaserJet M403dn
+双面设置：双面（长边翻转）（PMDuplexing=2）
+关键参数：collate=True copies=2 media=A4 sides=two-sided-long-edge
+```
+
+看到 `sides=two-sided-long-edge`（长边）或 `sides=two-sided-short-edge`（短边）就说明双面参数确实下发到打印系统了；如果打印机驱动本身不支持，会在“注意”里给出提示。
 
 ## 实现说明与已知限制
 
@@ -82,11 +106,31 @@ open dist/BatchPrint.app
 - 对于 Microsoft Word、Pages 和 TextEdit，仍会优先使用应用自身的 AppleScript 打印。
 - 转换 PDF 时会自动生成临时 `fonts.conf`，加载 `/System/Library/Fonts`、`/System/Library/Fonts/Supplemental`、`/Library/Fonts` 和用户字体目录，并加入常见中文字体别名。
 - macOS 系统通常没有“仿宋”“楷体”“方正小标宋简体”等字体，程序会将它们映射到系统已有的宋体或黑体，以保证内容完整，但字体样式可能不完全一致。若必须保持原字体，请先安装对应字体。
-- 双面、色彩模式、缩放等参数会写入 `NSPrintInfo`，但实际效果取决于打印机驱动是否支持这些 key。
+- 双面打印必须写进 `NSPrintInfo.printSettings`，键名是 `com_apple_print_PrintSettings_PMDuplexing`，取值为 `1` 单面、`2` 长边翻转、`3` 短边翻转。`NSPrintInfo.dictionary()` 只认官方声明的那几个键（纸张、份数、方向、缩放……），其它键会被静默忽略——早期版本写的 `NSPrintDuplex` / `NSPrintColorMode` 就属于这种情况，双面打印一直没生效，现在已改为正确写法。
+- 色彩模式通过驱动选项 `ColorModel`（`Gray` / `RGB` 等）设置，取值来自打印机 PPD；驱动未提供该选项时会跳过并在日志里提示。
+- 打印机会在打印前读取一次 PPD（`PMPrinterCopyDescriptionURL`），用于判断是否支持双面、支持哪种色彩模式；判断失败只是少一条提示，不会影响打印。
+- 份数会同时打开“按份装订”（collate），多页文档打印多份时是一份一份出纸。
+- 批次打印是“整批重复”：批次 3 表示选中的文件整套打完再重复两遍；如果只想让同一个文件多出几份，用“每份文件份数”。
 - AppleScript 自动打印首次运行时，macOS 可能要求授予自动化权限。
 - 目前没有启用 App Sandbox，因此应用可以直接读取用户选择的文件夹。若要提交 App Store，需要补充沙盒配置与文件访问权限处理。
 
 ## 常见问题
+
+### 怎么让一批文件“整批打完再打下一批”？
+
+在右侧设置面板的“批次（整批重复打印）”里设置批次数和批次间隔：
+
+- 批次数 3 = 把勾选的文件按列表顺序各打印一遍算 1 批，这样重复 3 批（先打完一批，再打下一批）。
+- 批次间隔用于取纸、装订，设为 0 就是一气呵成。
+- 打印过程中随时可以点“停止后续任务”，当前批打完后不再开始下一批。
+
+### 为什么双面打印以前打不出来？
+
+早期版本把双面参数写成了 `NSPrintDuplex` 键，但 AppKit 早已不认这个键（未知键会被静默忽略），所以双面设置从来没传到打印机。现在改为写入 `printSettings` 的 `com_apple_print_PrintSettings_PMDuplexing`（1 单面 / 2 长边 / 3 短边），日志里能看到 `sides=two-sided-long-edge` 之类的参数。若打印机驱动本身没有双面能力，日志会提示“未声明双面能力”。
+
+### 怎么确认参数真的生效？
+
+打开运行日志，看“实际下发参数”这一行；或者用命令行自检：`BatchPrint --print-check --duplex longEdge`。
 
 ### 为什么打印出来是空白页？
 

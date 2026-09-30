@@ -99,5 +99,42 @@ struct PrintPreset: Codable, Equatable {
     var scaling = ScalingMode.fit
     var scalePercentage = 100.0
     var orientation = Orientation.portrait
+    /// 整批重复的批次数：1 表示只打一遍，3 表示“把选中的文件整套打完，再整套打两遍”。
+    var rounds = 1
+    /// 每批之间的间隔秒数，留给人工取纸、装订的时间。
+    var roundDelaySeconds = 0.0
     var enabledTypes = Set(SupportedFileType.allCases.map(\.rawValue))
+
+    init() {}
+
+    /// 手写解码：新版本新增了批次相关的字段，旧存档里没有这些键，
+    /// 用 `decodeIfPresent` 兜底，避免升级后把用户之前保存的设置全部丢掉。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        printerName = try container.decodeIfPresent(String.self, forKey: .printerName)
+        pageRange = try container.decodeIfPresent(PageRange.self, forKey: .pageRange) ?? PageRange()
+        copies = try container.decodeIfPresent(Int.self, forKey: .copies) ?? 1
+        duplex = try container.decodeIfPresent(DuplexMode.self, forKey: .duplex) ?? .none
+        colorMode = try container.decodeIfPresent(ColorMode.self, forKey: .colorMode) ?? .color
+        paperSize = try container.decodeIfPresent(PaperSize.self, forKey: .paperSize) ?? .a4
+        customPaperWidthMM = try container.decodeIfPresent(Double.self, forKey: .customPaperWidthMM) ?? 210.0
+        customPaperHeightMM = try container.decodeIfPresent(Double.self, forKey: .customPaperHeightMM) ?? 297.0
+        scaling = try container.decodeIfPresent(ScalingMode.self, forKey: .scaling) ?? .fit
+        scalePercentage = try container.decodeIfPresent(Double.self, forKey: .scalePercentage) ?? 100.0
+        orientation = try container.decodeIfPresent(Orientation.self, forKey: .orientation) ?? .portrait
+        rounds = try container.decodeIfPresent(Int.self, forKey: .rounds) ?? 1
+        roundDelaySeconds = try container.decodeIfPresent(Double.self, forKey: .roundDelaySeconds) ?? 0.0
+        enabledTypes = try container.decodeIfPresent(Set<String>.self, forKey: .enabledTypes)
+            ?? Set(SupportedFileType.allCases.map(\.rawValue))
+    }
+
+    /// 合法的批次数，至少 1 批。
+    var normalizedRounds: Int {
+        min(max(rounds, 1), 99)
+    }
+
+    /// 合法的批次间隔（秒）。
+    var normalizedRoundDelaySeconds: Double {
+        min(max(roundDelaySeconds, 0), 3600)
+    }
 }

@@ -34,7 +34,7 @@ struct PrintSettingsView: View {
 
                 Section("份数与版面") {
                     Stepper(value: $store.preset.copies, in: 1...99) {
-                        LabeledContent("份数", value: "\(store.preset.copies)")
+                        LabeledContent("每份文件份数", value: "\(store.preset.copies)")
                     }
 
                     Picker("双面打印", selection: $store.preset.duplex) {
@@ -48,6 +48,22 @@ struct PrintSettingsView: View {
                             Text(orientation.title).tag(orientation)
                         }
                     }
+                }
+
+                Section("批次（整批重复打印）") {
+                    Stepper(value: $store.preset.rounds, in: 1...99) {
+                        LabeledContent("批次数", value: "\(store.preset.rounds)")
+                    }
+
+                    if store.preset.rounds > 1 {
+                        Stepper(value: $store.preset.roundDelaySeconds, in: 0...600, step: 5) {
+                            LabeledContent("批次间隔", value: "\(Int(store.preset.roundDelaySeconds)) 秒")
+                        }
+                    }
+
+                    Text(batchHint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("颜色与纸张") {
@@ -118,6 +134,22 @@ struct PrintSettingsView: View {
                 store.preset.printerName = newValue.isEmpty ? nil : newValue
             }
         )
+    }
+
+    /// 用一句人话解释“批次数”是怎么回事，省得跟“份数”混起来。
+    private var batchHint: String {
+        let rounds = store.preset.rounds
+        let copies = store.preset.copies
+
+        guard rounds > 1 else {
+            return "批次数为 1：选中的文件按列表顺序各打印 \(copies) 份，打完即结束。"
+        }
+
+        let delay = store.preset.roundDelaySeconds > 0
+            ? "，每批之间停 \(Int(store.preset.roundDelaySeconds)) 秒"
+            : ""
+        return "选中的文件按列表顺序各打印 \(copies) 份算 1 批，这样重复 \(rounds) 批\(delay)。"
+            + "适合“一批打完、取出装订，再打下一批”。"
     }
 
     private func typeBinding(for type: SupportedFileType) -> Binding<Bool> {

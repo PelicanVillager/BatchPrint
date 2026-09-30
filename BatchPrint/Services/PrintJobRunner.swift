@@ -3,20 +3,32 @@ import Foundation
 import PDFKit
 
 struct PrintSummary {
+    /// 计划打印的作业总数 = 文件数 × 批次数。
     var total: Int
+    var rounds: Int
     var succeeded: Int
     var failed: [String]
     var skipped: [String]
+    /// 因为中途停止而没有提交的作业数。
+    var notExecuted: Int
 }
 
 struct PrintProgress {
     var isRunning = false
-    var currentIndex = 0
+    /// 已处理（成功或失败）的作业数，跨批次累计。
+    var completedJobs = 0
+    /// 计划作业总数 = 文件数 × 批次数。
     var total = 0
+    var currentRound = 1
+    var rounds = 1
+    /// 当前批内正在打印第几个文件。
+    var currentRoundIndex = 0
+    /// 当前批的文件数。
+    var currentRoundTotal = 0
     var currentFileName = ""
     var fractionCompleted: Double {
         guard total > 0 else { return 0 }
-        return Double(currentIndex) / Double(total)
+        return Double(completedJobs) / Double(total)
     }
 }
 
@@ -59,6 +71,8 @@ final class PrintJobRunner: ObservableObject {
 
     private var cancelled = false
     private var onStatusChange: ((UUID, PrintJobStatus) -> Void)?
+    /// 本次运行中已经转换好的 Word → PDF，批次之间复用，避免每一批都重新转换。
+    private var convertedPDFs: [URL: URL] = [:]
 
     func cancel() {
         cancelled = true
@@ -69,6 +83,20 @@ final class PrintJobRunner: ObservableObject {
         cancelled = false
         progress = PrintProgress()
         logLines.removeAll()
+        removeConvertedPDFs()
+    }
+
+    /// 清理转换出来的临时 PDF 及其临时目录。
+    private func removeConvertedPDFs() {
+        for pdfURL in convertedPDFs.values {
+            let directory = pdfURL.deletingLastPathComponent()
+            if directory.lastPathComponent.hasPrefix("BatchPrint-") {
+                try? FileManager.default.removeItem(at: directory)
+            } else {
+                try? FileManager.default.removeItem(at: pdfURL)
+            }
+        }
+        convertedPDFs.removeAll()
     }
 
     func run(
@@ -78,56 +106,133 @@ final class PrintJobRunner: ObservableObject {
     ) async -> PrintSummary {
         reset()
         self.onStatusChange = onStatusChange
+        defer { removeConvertedPDFs() }
 
         let queue = items.filter(\.isSelected)
-        progress.total = queue.count
+        let rounds = preset.normalizedRounds
+        let totalJobs = queue.count * rounds
+
+        progress.total = totalJobs
+        progress.rounds = rounds
+        progress.currentRoundTotal = queue.count
         progress.isRunning = true
 
         var succeeded = 0
         var failures: [String] = []
         var skipped: [String] = []
+        var completed = 0
 
-        appendLog("打印队列共 \(queue.count) 个文件。")
+        if rounds > 1 {
+            appendLog("打印队列共 \(queue.count) 个文件 × \(rounds) 批，合计 \(totalJobs) 个作业。")
+        } else {
+            appendLog("打印队列共 \(queue.count) 个文件。")
+        }
+        logPrintSetup(preset: preset)
 
-        for (index, item) in queue.enumerated() {
-            if cancelled {
-                appendLog("已停止。")
-                skipped.append(item.fileName)
-                updateStatus(for: item.id, status: .skipped("用户停止"))
-                continue
+        // 外层是批次：每一批都按列表顺序把选中的文件各打印一遍，
+        // 打完一批才进入下一批，避免“同一个文件连着打好几份”。
+        for round in 1...rounds {
+            if cancelled { break }
+
+            progress.currentRound = round
+            if rounds > 1 {
+                appendLog("—— 第 \(round)/\(rounds) 批开始 ——")
             }
 
-            progress.currentIndex = index + 1
-            progress.currentFileName = item.fileName
-            updateStatus(for: item.id, status: .printing)
-            appendLog("正在打印第 \(index + 1)/\(queue.count) 个文件：\(item.fileName)")
+            for (index, item) in queue.enumerated() {
+                if cancelled {
+                    for pending in queue[index...] {
+                        skipped.append(pending.fileName)
+                        updateStatus(for: pending.id, status: .skipped("用户停止"))
+                    }
+                    appendLog("已停止：本批剩余 \(queue.count - index) 个文件未打印。")
+                    break
+                }
 
-            do {
-                try await printFile(at: item.url, preset: preset)
-                succeeded += 1
-                updateStatus(for: item.id, status: .success)
-                appendLog("成功：\(item.fileName)")
-            } catch {
-                let message = error.localizedDescription
-                failures.append("\(item.fileName)：\(message)")
-                updateStatus(for: item.id, status: .failed(message))
-                appendLog("失败：\(item.fileName) — \(message)")
+                progress.currentRoundIndex = index + 1
+                progress.currentFileName = item.fileName
+                updateStatus(for: item.id, status: .printing)
+                if rounds > 1 {
+                    appendLog("第 \(round)/\(rounds) 批 · 第 \(index + 1)/\(queue.count) 个文件：\(item.fileName)")
+                } else {
+                    appendLog("正在打印第 \(index + 1)/\(queue.count) 个文件：\(item.fileName)")
+                }
+
+                do {
+                    try await printFile(at: item.url, preset: preset)
+                    succeeded += 1
+                    completed += 1
+                    updateStatus(for: item.id, status: .success)
+                    appendLog("成功：\(item.fileName)")
+                } catch {
+                    let message = error.localizedDescription
+                    let prefix = rounds > 1 ? "第 \(round) 批 · " : ""
+                    failures.append("\(prefix)\(item.fileName)：\(message)")
+                    completed += 1
+                    updateStatus(for: item.id, status: .failed(message))
+                    appendLog("失败：\(item.fileName) — \(message)")
+                }
+
+                progress.completedJobs = completed
+                await Task.yield()
             }
 
-            await Task.yield()
+            if cancelled { break }
+
+            if rounds > 1 {
+                appendLog("—— 第 \(round)/\(rounds) 批完成 ——")
+            }
+            if round < rounds {
+                await waitBetweenRounds(nextRound: round + 1, rounds: rounds, seconds: preset.normalizedRoundDelaySeconds)
+            }
         }
 
         progress.isRunning = false
         progress.currentFileName = ""
+        progress.currentRoundIndex = 0
 
         let summary = PrintSummary(
-            total: queue.count,
+            total: totalJobs,
+            rounds: rounds,
             succeeded: succeeded,
             failed: failures,
-            skipped: skipped
+            skipped: skipped,
+            notExecuted: max(0, totalJobs - completed)
         )
-        appendLog("完成：成功 \(summary.succeeded) 个，失败 \(summary.failed.count) 个，跳过 \(summary.skipped.count) 个。")
+        appendLog("完成：成功 \(summary.succeeded) 个，失败 \(summary.failed.count) 个，未执行 \(summary.notExecuted) 个。")
         return summary
+    }
+
+    /// 批次之间的等待时间，期间随时可以点“停止后续任务”。
+    private func waitBetweenRounds(nextRound: Int, rounds: Int, seconds: Double) async {
+        guard seconds > 0 else { return }
+
+        appendLog("等待 \(Int(seconds)) 秒后开始第 \(nextRound)/\(rounds) 批（可随时停止）。")
+        var remaining = seconds
+        while remaining > 0 {
+            if cancelled {
+                appendLog("已停止，不再开始下一批。")
+                return
+            }
+            let slice = min(0.5, remaining)
+            try? await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
+            remaining -= slice
+        }
+    }
+
+    /// 打印前把最终下发的参数写进日志，方便确认双面、色彩等设置是否真的生效。
+    private func logPrintSetup(preset: PrintPreset) {
+        do {
+            let printInfo = try PrintInfoFactory.make(preset: preset)
+            let report = PrintSetupInspector.report(for: printInfo, preset: preset)
+            appendLog("目标打印机：\(report.printerName)")
+            appendLog("实际下发参数：\(report.summary)")
+            for warning in report.warnings {
+                appendLog("注意：\(warning)")
+            }
+        } catch {
+            appendLog("打印参数自检失败：\(error.localizedDescription)")
+        }
     }
 
     private func updateStatus(for id: UUID, status: PrintJobStatus) {
@@ -169,92 +274,28 @@ final class PrintJobRunner: ObservableObject {
         }
 
         let pdfURL: URL
-        do {
-            appendLog("正在将 Word 文档转换为 PDF：\(url.lastPathComponent)")
-            pdfURL = try await OfficePDFConverter.convertToPDF(sourceURL: url)
-        } catch {
-            appendLog("Word 转 PDF 失败，将退回 RTF 打印：\(error.localizedDescription)")
-            try await WordDocumentPrinter.printDocument(at: url, preset: preset)
-            return
+        if let cached = convertedPDFs[url] {
+            appendLog("复用本次运行已转换的 PDF：\(url.lastPathComponent)")
+            pdfURL = cached
+        } else {
+            do {
+                appendLog("正在将 Word 文档转换为 PDF：\(url.lastPathComponent)")
+                let converted = try await OfficePDFConverter.convertToPDF(sourceURL: url)
+                convertedPDFs[url] = converted
+                pdfURL = converted
+            } catch {
+                appendLog("Word 转 PDF 失败，将退回 RTF 打印：\(error.localizedDescription)")
+                try await WordDocumentPrinter.printDocument(at: url, preset: preset)
+                return
+            }
         }
 
         if let convertedDocument = PDFDocument(url: pdfURL) {
             appendLog("PDF 转换完成：\(convertedDocument.pageCount) 页，提取文字 \(convertedDocument.string?.count ?? 0) 字符")
         }
 
-        defer {
-            try? FileManager.default.removeItem(at: pdfURL)
-        }
-
         appendLog("开始打印转换后的 PDF：\(url.lastPathComponent)")
         try printPDF(at: pdfURL, preset: preset)
-    }
-
-    private func makePrintInfo(preset: PrintPreset) throws -> NSPrintInfo {
-        guard let printInfo = NSPrintInfo.shared.copy() as? NSPrintInfo else {
-            throw PrintRunnerError.missingPrinter(preset.printerName ?? "默认打印机")
-        }
-
-        if let printerName = preset.printerName, let printer = NSPrinter(name: printerName) {
-            printInfo.printer = printer
-        }
-
-        printInfo.orientation = preset.orientation == .portrait ? .portrait : .landscape
-        printInfo.horizontalPagination = .fit
-        printInfo.verticalPagination = .fit
-        printInfo.isHorizontallyCentered = true
-        printInfo.isVerticallyCentered = true
-
-        let paper = paperSize(for: preset)
-        printInfo.paperSize = paper
-
-        let attributes = printInfo.dictionary()
-        attributes[NSPrintInfo.AttributeKey.copies] = NSNumber(value: preset.copies)
-
-        if preset.scaling == .percentage {
-            attributes[NSPrintInfo.AttributeKey.scalingFactor] = NSNumber(value: preset.scalePercentage / 100.0)
-        }
-
-        switch preset.colorMode {
-        case .color:
-            attributes[NSPrintInfo.AttributeKey("NSPrintColorMode")] = NSNumber(value: 1)
-        case .monochrome:
-            attributes[NSPrintInfo.AttributeKey("NSPrintColorMode")] = NSNumber(value: 2)
-        case .grayscale:
-            attributes[NSPrintInfo.AttributeKey("NSPrintColorMode")] = NSNumber(value: 3)
-        }
-
-        let duplexValue: NSNumber
-        switch preset.duplex {
-        case .none:
-            duplexValue = NSNumber(value: 0)
-        case .longEdge:
-            duplexValue = NSNumber(value: 1)
-        case .shortEdge:
-            duplexValue = NSNumber(value: 2)
-        }
-        attributes[NSPrintInfo.AttributeKey("NSPrintDuplex")] = duplexValue
-
-        return printInfo
-    }
-
-    private func paperSize(for preset: PrintPreset) -> NSSize {
-        switch preset.paperSize {
-        case .a4:
-            return NSSize(width: 595.28, height: 841.89)
-        case .letter:
-            return NSSize(width: 612, height: 792)
-        case .a3:
-            return NSSize(width: 841.89, height: 1190.55)
-        case .legal:
-            return NSSize(width: 612, height: 1008)
-        case .b5:
-            return NSSize(width: 498.9, height: 708.66)
-        case .custom:
-            let width = max(100, preset.customPaperWidthMM) * 72.0 / 25.4
-            let height = max(100, preset.customPaperHeightMM) * 72.0 / 25.4
-            return NSSize(width: width, height: height)
-        }
     }
 
     private func printPDF(at url: URL, preset: PrintPreset) throws {
@@ -280,7 +321,7 @@ final class PrintJobRunner: ObservableObject {
             documentToPrint = subset
         }
 
-        let info = try makePrintInfo(preset: preset)
+        let info = try PrintInfoFactory.make(preset: preset)
         guard let operation = documentToPrint.printOperation(
             for: info,
             scalingMode: preset.scaling == .fit ? .pageScaleDownToFit : .pageScaleNone,
@@ -336,7 +377,7 @@ final class PrintJobRunner: ObservableObject {
             throw PrintRunnerError.cannotOpenFile(url.lastPathComponent)
         }
 
-        let info = try makePrintInfo(preset: preset)
+        let info = try PrintInfoFactory.make(preset: preset)
         let imageView = NSImageView(frame: NSRect(origin: .zero, size: image.size))
         imageView.image = image
         imageView.imageScaling = preset.scaling == .fit ? .scaleProportionallyDown : .scaleAxesIndependently
