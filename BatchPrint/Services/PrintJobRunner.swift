@@ -301,9 +301,8 @@ final class PrintJobRunner: ObservableObject {
                 convertedPDFs[url] = converted
                 pdfURL = converted
             } catch {
-                appendLog("Word 转 PDF 失败，将退回 RTF 打印：\(error.localizedDescription)")
-                try await WordDocumentPrinter.printDocument(at: url, preset: preset)
-                return
+                appendLog("Word 转 PDF 失败，已停止该文件，避免简化排版后误打印：\(error.localizedDescription)")
+                throw error
             }
         }
 

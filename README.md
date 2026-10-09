@@ -5,8 +5,11 @@ BatchPrint 是一个 macOS 原生批量打印工具，使用 SwiftUI 编写。�
 ## 功能概览
 
 - 选择源文件夹并递归扫描 `.pdf`、`.doc`、`.docx`、`.jpg`、`.png`、`.tiff` 文件。
-- 文件列表展示名称、大小、修改时间和状态。
-- 支持勾选、全选/反选、拖拽排序。
+- 支持从文件夹单独导入一个或多个文件，重复导入自动去重。
+- 文件夹层级视图保留二级、三级等目录，可展开、收起；打印顺序视图按实际队列排列。
+- 文件列表展示打印序号、名称、大小、修改时间和状态。
+- 支持勾选、全选/反选；在“打印顺序”视图拖动排序，也可选中行后用上下箭头或右键移动。刷新后保留手动顺序和勾选。
+- 导入文件夹：⌘O；导入单个或多个文件：⇧⌘O。可以追加多个来源。
 - 自动获取系统打印机列表，保存并恢复打印预设。
 - 打印前先给目标队列做一次“体检”：队列被停用、打印机掉线都会当场提示并提供一键恢复；还能读出队列的出错策略，一键开启“超时自动重试”。
 - 支持页面范围、份数、单双面、色彩模式、纸张尺寸、缩放和方向设置。
@@ -16,7 +19,7 @@ BatchPrint 是一个 macOS 原生批量打印工具，使用 SwiftUI 编写。�
 - 显示实时进度和运行日志，结束后输出成功/失败汇总。
 - 打印过程中可停止后续任务；已提交的作业不受影响。
 - 选中单个 `.doc`/`.docx` 文件后，可点击“转换预览”先查看 PDF 转换结果，再决定是否打印。
-- `.doc`/`.docx` 转换时自动加载 macOS 系统中文字体，并映射宋体、仿宋、楷体、黑体等常见字体名，减少空白页和缺字问题。
+- `.doc`/`.docx` 转换时自动加载系统和用户中文字体，优先使用已安装的原字体，避免强制替换仿宋、楷体造成行高和分页变化。
 
 ## 项目结构
 
@@ -72,6 +75,7 @@ open dist/BatchPrint.app
 
 ```bash
 make check   # 打印参数自检，不开界面
+make regression-test # 文件导入、目录、排序和字体配置回归检查
 make run     # 打包并打开 .app
 ```
 
@@ -143,10 +147,11 @@ sudo lpadmin -p HP_LaserJet_M403dn_BW -o printer-error-policy=retry-job
   - 环境变量 `BATCHPRINT_SOFFICE_PATH` 指定的 `soffice`
   - 常见 LibreOffice/OpenOffice 安装路径
   - 本机 Codex 运行时中的 LibreOffice
-- 如果找不到 LibreOffice/OpenOffice，会退回使用 macOS `textutil` 转成 RTF 打印。
+- 转换失败时停止该文件并报告错误，避免 RTF 简化排版后误打印。
 - 对于 Microsoft Word、Pages 和 TextEdit，仍会优先使用应用自身的 AppleScript 打印。
 - 转换 PDF 时会自动生成临时 `fonts.conf`，加载 `/System/Library/Fonts`、`/System/Library/Fonts/Supplemental`、`/Library/Fonts` 和用户字体目录，并加入常见中文字体别名。
-- macOS 系统通常没有“仿宋”“楷体”“方正小标宋简体”等字体，程序会将它们映射到系统已有的宋体或黑体，以保证内容完整，但字体样式可能不完全一致。若必须保持原字体，请先安装对应字体。
+- 仿宋、楷体、小标宋优先匹配已安装字体的真实 family 名称，包括用户字体目录中尚未被系统注册的字体。仅在缺少原字体时使用后备字体。
+- LibreOffice 与 Word/WPS 的排版引擎仍有差异，复杂表格不能保证分页完全一致。可先使用“转换预览”检查；必须完全保持原应用版式时，在 Word/WPS 中导出 PDF 后通过“导入文件”打印。
 - 双面打印必须写进 `NSPrintInfo.printSettings`，键名是 `com_apple_print_PrintSettings_PMDuplexing`，取值为 `1` 单面、`2` 长边翻转、`3` 短边翻转。`NSPrintInfo.dictionary()` 只认官方声明的那几个键（纸张、份数、方向、缩放……），其它键会被静默忽略——早期版本写的 `NSPrintDuplex` / `NSPrintColorMode` 就属于这种情况，双面打印一直没生效，现在已改为正确写法。
 - 色彩模式通过驱动选项 `ColorModel`（`Gray` / `RGB` 等）设置，取值来自打印机 PPD；驱动未提供该选项时会跳过并在日志里提示。
 - 打印机会在打印前读取一次 PPD（`PMPrinterCopyDescriptionURL`），用于判断是否支持双面、支持哪种色彩模式；判断失败只是少一条提示，不会影响打印。

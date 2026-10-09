@@ -7,6 +7,7 @@ struct PrintFileItem: Identifiable, Equatable {
     let fileExtension: String
     let fileSize: Int64
     let modifiedAt: Date?
+    let sourceFolder: URL?
     var isSelected: Bool
     var status: PrintJobStatus
 
@@ -17,6 +18,7 @@ struct PrintFileItem: Identifiable, Equatable {
         fileExtension: String,
         fileSize: Int64,
         modifiedAt: Date?,
+        sourceFolder: URL? = nil,
         isSelected: Bool = true,
         status: PrintJobStatus = .queued
     ) {
@@ -26,6 +28,7 @@ struct PrintFileItem: Identifiable, Equatable {
         self.fileExtension = fileExtension
         self.fileSize = fileSize
         self.modifiedAt = modifiedAt
+        self.sourceFolder = sourceFolder
         self.isSelected = isSelected
         self.status = status
     }

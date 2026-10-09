@@ -1,4 +1,6 @@
 import Foundation
+import CoreText
+import PDFKit
 
 enum OfficePDFConverter {
     static func convertToPDF(sourceURL: URL) async throws -> URL {
@@ -19,32 +21,10 @@ enum OfficePDFConverter {
             let fontConfigurationURL = outputDirectory.appendingPathComponent("fonts.conf")
             let homeFontDirectory = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Fonts", isDirectory: true)
-            let fontConfiguration = """
-            <?xml version="1.0"?>
-            <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-            <fontconfig>
-                <dir>/System/Library/Fonts</dir>
-                <dir>/System/Library/Fonts/Supplemental</dir>
-                <dir>/Library/Fonts</dir>
-                <dir>\(homeFontDirectory.path)</dir>
-                <cachedir>\(fontCacheDirectory.path)</cachedir>
-                <match target="pattern"><test name="family"><string>宋体</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>SimSun</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>NSimSun</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>仿宋</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>仿宋_GB2312</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>FangSong</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>FangSong_GB2312</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>楷体</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>楷体_GB2312</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>KaiTi</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>KaiTi_GB2312</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>方正小标宋简体</string></test><edit name="family" mode="prepend" binding="strong"><string>宋体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>黑体</string></test><edit name="family" mode="prepend" binding="strong"><string>黑体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>SimHei</string></test><edit name="family" mode="prepend" binding="strong"><string>黑体-简</string></edit></match>
-                <match target="pattern"><test name="family"><string>MS Gothic</string></test><edit name="family" mode="prepend" binding="strong"><string>冬青黑体简体中文</string></edit></match>
-            </fontconfig>
-            """
+            // 先用已安装的原字体；只有缺少原字体时才加入后备字体。
+            let fontConfiguration = fontConfigurationXML(
+                homeFontDirectory: homeFontDirectory, cacheDirectory: fontCacheDirectory
+            )
             try fontConfiguration.write(
                 to: fontConfigurationURL,
                 atomically: true,
@@ -54,7 +34,7 @@ enum OfficePDFConverter {
             let process = Process()
             process.executableURL = sofficeURL
             process.arguments = [
-                "-env:UserInstallation=file://\(profileDirectory.path)",
+                "-env:UserInstallation=\(profileDirectory.absoluteString)",
                 "--headless",
                 "--convert-to",
                 "pdf",
@@ -67,16 +47,20 @@ enum OfficePDFConverter {
             environment["XDG_CACHE_HOME"] = outputDirectory.path
             process.environment = environment
 
-            let standardOutput = Pipe()
-            let standardError = Pipe()
-            process.standardOutput = standardOutput
-            process.standardError = standardError
+            let logURL = outputDirectory.appendingPathComponent("conversion.log")
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            let logHandle = try FileHandle(forWritingTo: logURL)
+            defer { try? logHandle.close() }
+            process.standardOutput = logHandle
+            process.standardError = logHandle
+            var succeeded = false
+            defer { if !succeeded { try? FileManager.default.removeItem(at: outputDirectory) } }
 
             try process.run()
             process.waitUntilExit()
 
             guard process.terminationStatus == 0 else {
-                let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
+                let errorData = (try? Data(contentsOf: logURL)) ?? Data()
                 let message = String(data: errorData, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知错误"
                 throw PrintRunnerError.officeConversionFailed(message)
@@ -84,21 +68,65 @@ enum OfficePDFConverter {
 
             let expectedName = sourceURL.deletingPathExtension().lastPathComponent + ".pdf"
             let expectedURL = outputDirectory.appendingPathComponent(expectedName)
-            if FileManager.default.fileExists(atPath: expectedURL.path) {
-                return expectedURL
+            guard let document = PDFDocument(url: expectedURL), document.pageCount > 0 else {
+                throw PrintRunnerError.officeConversionFailed("未生成有效 PDF，请检查文档是否损坏或受密码保护。")
             }
-
-            let pdfFiles = try FileManager.default.contentsOfDirectory(
-                at: outputDirectory,
-                includingPropertiesForKeys: nil
-            ).filter { $0.pathExtension.lowercased() == "pdf" }
-
-            guard let firstPDF = pdfFiles.first else {
-                throw PrintRunnerError.officeConversionFailed("转换完成，但未找到 PDF 输出文件。")
-            }
-
-            return firstPDF
+            succeeded = true
+            return expectedURL
         }.value
+    }
+
+    static func fontConfigurationXML(homeFontDirectory: URL, cacheDirectory: URL) -> String {
+        var families = CTFontManagerCopyAvailableFontFamilyNames() as? [String] ?? []
+        // 新装的字体可能尚未被 CoreText 注册，直接读取字体文件的真实 family 名称。
+        for directory in [URL(fileURLWithPath: "/Library/Fonts"), homeFontDirectory] {
+            if let urls = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                for case let url as URL in urls where ["ttf", "otf", "ttc", "dfont"].contains(url.pathExtension.lowercased()) {
+                    if let descriptors = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor] {
+                        for descriptor in descriptors {
+                            if let family = CTFontDescriptorCopyAttribute(descriptor, kCTFontFamilyNameAttribute) as? String {
+                                families.append(family)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let groups: [(aliases: [String], candidates: [String], fallback: String)] = [
+            (["宋体", "SimSun", "NSimSun"], ["宋体", "SimSun", "宋体-简", "Songti SC"], "Songti SC"),
+            (["仿宋", "仿宋_GB2312", "FangSong", "FangSong_GB2312"], ["仿宋", "仿宋_GB2312", "FangSong", "FangSong_GB2312", "STFangsong"], "Songti SC"),
+            (["楷体", "楷体_GB2312", "KaiTi", "KaiTi_GB2312"], ["楷体", "楷体_GB2312", "KaiTi", "KaiTi_GB2312", "楷体-简", "Kaiti SC"], "Kaiti SC"),
+            (["方正小标宋简体", "方正小标宋", "FZXiaoBiaoSong-B05S"], ["方正小标宋简体", "方正小标宋", "方正简体小标宋", "FZXiaoBiaoSong-B05S"], "Songti SC"),
+            (["黑体", "SimHei"], ["黑体", "SimHei", "黑体-简", "Heiti SC"], "Heiti SC")
+        ]
+        var rules: [String] = []
+        for group in groups {
+            let target = group.candidates.compactMap { candidate in
+                families.first { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+            }.first ?? group.fallback
+            for alias in group.aliases {
+                // 不覆盖已经安装的同名字体。
+                guard !families.contains(where: { $0.caseInsensitiveCompare(alias) == .orderedSame }) else { continue }
+                rules.append("<alias binding=\"strong\"><family>\(xmlEscaped(alias))</family><prefer><family>\(xmlEscaped(target))</family></prefer></alias>")
+            }
+        }
+        let directories = ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts", homeFontDirectory.path]
+        return """
+        <?xml version="1.0"?>
+        <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+        <fontconfig>
+        \(directories.map { "<dir>\(xmlEscaped($0))</dir>" }.joined(separator: "\n"))
+        <cachedir>\(xmlEscaped(cacheDirectory.path))</cachedir>
+        \(rules.joined(separator: "\n"))
+        </fontconfig>
+        """
+    }
+
+    private static func xmlEscaped(_ value: String) -> String {
+        value.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     private static func libreOfficeExecutable() -> URL? {
@@ -110,16 +138,17 @@ enum OfficePDFConverter {
         }
 
         let home = FileManager.default.homeDirectoryForCurrentUser
-        candidates.append(
-            home.appendingPathComponent(
-                ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/libreoffice-headless/libreoffice/LibreOfficeDev.app/Contents/MacOS/soffice"
-            )
-        )
         candidates.append(URL(fileURLWithPath: "/Applications/LibreOffice.app/Contents/MacOS/soffice"))
         candidates.append(URL(fileURLWithPath: "/Applications/OpenOffice.app/Contents/MacOS/soffice"))
         candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/soffice"))
         candidates.append(URL(fileURLWithPath: "/usr/local/bin/soffice"))
         candidates.append(URL(fileURLWithPath: "/usr/bin/soffice"))
+
+        candidates.append(
+            home.appendingPathComponent(
+                ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/libreoffice-headless/libreoffice/LibreOfficeDev.app/Contents/MacOS/soffice"
+            )
+        )
 
         return candidates.first {
             FileManager.default.isExecutableFile(atPath: $0.path)

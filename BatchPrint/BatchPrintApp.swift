@@ -26,11 +26,16 @@ struct BatchPrintApp: App {
                     NotificationCenter.default.post(name: .batchPrintSelectFolder, object: nil)
                 }
                 .keyboardShortcut("o", modifiers: [.command])
+                Button("导入文件…") {
+                    NotificationCenter.default.post(name: .batchPrintSelectFiles, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
             }
         }
     }
 }
 
 extension Notification.Name {
+    static let batchPrintSelectFiles = Notification.Name("BatchPrintSelectFiles")
     static let batchPrintSelectFolder = Notification.Name("BatchPrintSelectFolder")
 }

@@ -1,12 +1,13 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var store: PrintPresetStore
     @StateObject private var runner = PrintJobRunner()
     @StateObject private var printerMonitor = PrinterMonitor()
 
-    @State private var folderURL: URL?
+    @State private var importSources: [URL] = []
     @State private var files: [PrintFileItem] = []
     @State private var selectedIDs: Set<UUID> = []
     @State private var printerNames: [String] = []
@@ -83,6 +84,9 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .batchPrintSelectFolder)) { _ in
             chooseFolder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .batchPrintSelectFiles)) { _ in
+            chooseFiles()
         }
         .onReceive(NotificationCenter.default.publisher(for: .batchPrintRefreshPrinters)) { _ in
             refreshPrinterList()
@@ -165,15 +169,23 @@ struct ContentView: View {
             Button {
                 chooseFolder()
             } label: {
-                Label("选择文件夹", systemImage: "folder")
+                Label("导入文件夹", systemImage: "folder")
             }
+            .disabled(isPrinting || isPreviewing)
+
+            Button {
+                chooseFiles()
+            } label: {
+                Label("导入文件", systemImage: "doc.badge.plus")
+            }
+            .disabled(isPrinting || isPreviewing)
 
             Button {
                 refreshFolder()
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
-            .disabled(folderURL == nil)
+            .disabled(importSources.isEmpty || isPrinting || isPreviewing)
 
             Divider()
                 .frame(height: 20)
@@ -201,8 +213,8 @@ struct ContentView: View {
 
             Spacer()
 
-            if let folderURL {
-                Text(folderURL.lastPathComponent)
+            if !importSources.isEmpty {
+                Text("已导入 \(importSources.count) 个来源")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -325,16 +337,38 @@ struct ContentView: View {
         panel.prompt = "选择源文件夹"
 
         if panel.runModal() == .OK, let url = panel.url {
-            folderURL = url
-            refreshFolder()
+            addSources([url])
         }
     }
 
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = SupportedFileType.allCases.compactMap { UTType(filenameExtension: $0.rawValue) }
+        panel.prompt = "导入文件"
+        if panel.runModal() == .OK {
+            // 单独选择文件就是明确导入，不因类型筛选被悄悄忽略。
+            store.preset.enabledTypes.formUnion(panel.urls.map { $0.pathExtension.lowercased() })
+            addSources(panel.urls)
+        }
+    }
+
+    private func addSources(_ urls: [URL]) {
+        let added = urls.filter { !importSources.contains($0) }
+        do {
+            let updated = try FolderScanner().scan(sources: importSources + added, preserving: files, enabledTypes: store.preset.enabledTypes)
+            importSources.append(contentsOf: added)
+            files = updated
+        } catch { scannerErrorMessage = error.localizedDescription }
+    }
+
     private func refreshFolder() {
-        guard let folderURL else { return }
+        guard !importSources.isEmpty else { return }
         do {
             files = try FolderScanner().scan(
-                folder: folderURL,
+                sources: importSources,
                 preserving: files,
                 enabledTypes: store.preset.enabledTypes
             )

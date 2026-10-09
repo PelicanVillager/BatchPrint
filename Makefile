@@ -48,3 +48,9 @@ self-test: build
 clean:
 	swift package clean
 	rm -rf dist
+
+# 文件导入、层级和转换配置回归检查，不访问打印机。
+regression-test:
+	mkdir -p "$(BUILD_DIR)"
+	swiftc $(SWIFT_FLAGS) -parse-as-library -o "$(BUILD_DIR)/RegressionChecks" Tests/RegressionChecks.swift BatchPrint/Models/FileType.swift BatchPrint/Models/PrintFileItem.swift BatchPrint/Models/PrintJobStatus.swift BatchPrint/Services/FolderScanner.swift BatchPrint/Views/FileListView.swift BatchPrint/Services/OfficePDFConverter.swift
+	"$(BUILD_DIR)/RegressionChecks"
